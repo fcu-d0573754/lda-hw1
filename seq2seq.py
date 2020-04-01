@@ -22,7 +22,7 @@ parser.add_argument('--output_dir', type=str, default='./datasets/seq2seq')#trai
 # parser.add_argument('--eval', action='store_true', default=False)
 parser.add_argument('--output_path',
                     type=str,
-                    default='./seq2seq_attention_result.txt')#predict end
+                    default='./seq2seq_attention_ans.txt')#predict end
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # embed_dim = 250
@@ -332,33 +332,35 @@ def predict(args, test, model):
         embedding = pickle.load(f)
     model.eval()
     with torch.no_grad():
-        for i, test_batch in enumerate(test):
-            summaries = []
-            ids = []
-            input_seqs = torch.LongTensor(test_batch['text']).transpose(0, 1).to(device)
-            input_tgr = torch.LongTensor(test_batch['summary']).transpose(0, 1).to(device)
-            input_id = test_batch['id']
-            ids.append(input_id)
-            outputs, output_idx = model(input_seqs, input_tgr, test_batch['len_text'], test_batch['summary'], 0)
-            output_idx = output_idx.transpose(0, 1) #[batch * len]
-            for batch in range(output_idx.size(0)):
-                summary = []
-                for i in range(output_idx.size(1)):
-                    if embedding.vocab[output_idx[batch][i]] == '</s>':
-                        summary.append(embedding.vocab[output_idx[batch][i]])
-                        break
-                    else:
-                        summary.append(embedding.vocab[output_idx[batch][i]])
-                summaries.append(summary)
-            with open(args.output_path, 'w') as f:
+        with open(args.output_path, 'w') as f:
+            for i, test_batch in enumerate(test):
+                summaries = []
+                ids = []
+                input_seqs = torch.LongTensor(test_batch['text']).transpose(0, 1).to(device)
+                input_tgr = torch.LongTensor(test_batch['summary']).transpose(0, 1).to(device)
+                input_id = test_batch['id']
+                ids = input_id
+                outputs, output_idx = model(input_seqs, input_tgr, test_batch['len_text'], test_batch['summary'], 0)
+                output_idx = output_idx.transpose(0, 1) #[batch * len]
+                for batch in range(output_idx.size(0)):
+                    summary = []
+                    for i in range(output_idx.size(1)):
+                        if embedding.vocab[output_idx[batch][i]] == '</s>':
+                            summary.append(embedding.vocab['<unk>'])
+                            break
+                        else:
+                            summary.append(embedding.vocab[output_idx[batch][i]])
+                    summaries.append(summary)
+                
                 objs = [{
                     'id': idx,
-                    'predict': summary
+                    'predict': ' '.join(summary)
                 } for idx, summary in zip(ids, summaries)]
 
                 objs = sorted(objs, key=lambda x: x['id'])
                 for obj in objs:
                     f.write(json.dumps(obj) + '\n')
+                print('load {} batch prdiction into josn'.format(i), end='\r')
     
       
          
@@ -395,7 +397,7 @@ if __name__ == '__main__':
     #predict 
     else:
         print('loading testing data...')
-        with open(args.output_dir+'/test.pkl', 'rb') as f:
+        with open(args.output_dir+'/valid.pkl', 'rb') as f:
             test_dataset = pickle.load(f)
         test_loader = torch.utils.data.DataLoader(dataset = test_dataset,
                                             batch_size = batch_size,
