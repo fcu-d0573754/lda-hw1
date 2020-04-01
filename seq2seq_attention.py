@@ -17,7 +17,7 @@ import json
 
 parser = argparse.ArgumentParser()
 # parser.add_argument('--data_path', type=str, default='./data/train.jsonl')
-# parser.add_argument('--attention', type=str, default=None)
+parser.add_argument('--attention', type=str, default=None)
 parser.add_argument('--output_dir', type=str, default='./datasets/seq2seq')#train.jsonl
 # parser.add_argument('--eval', action='store_true', default=False)
 parser.add_argument('--output_path',
@@ -30,7 +30,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 learning_rate = 0.0001
 decoder_learning_rate_ratio = 5
 l2 = 0
-batch_size = 16
+batch_size = 8
 n_iters = 20
 clip = 50.0
 hidden_size = 512
@@ -119,29 +119,29 @@ class Encoder(nn.Module):
         return outputs, hidden
     
     
-# class Attention(nn.Module):
-#     def __init__(self, hidden_size):
-#         super(Attention, self).__init__()
-#         self.hidden_size = hidden_size
-#         self.attn = nn.Linear(self.hidden_size * 2, hidden_size)
-#         self.v = nn.Parameter(torch.rand(hidden_size))
-#         stdv = 1. / math.sqrt(self.v.size(0))
-#         self.v.data.uniform_(-stdv, stdv)
+class Attention(nn.Module):
+    def __init__(self, hidden_size):
+        super(Attention, self).__init__()
+        self.hidden_size = hidden_size
+        self.attn = nn.Linear(self.hidden_size * 2, hidden_size)
+        self.v = nn.Parameter(torch.rand(hidden_size))
+        stdv = 1. / math.sqrt(self.v.size(0))
+        self.v.data.uniform_(-stdv, stdv)
 
-#     def forward(self, hidden, encoder_outputs):
-#         timestep = encoder_outputs.size(0)
-#         h = hidden.repeat(timestep, 1, 1).transpose(0, 1)
-#         encoder_outputs = encoder_outputs.transpose(0, 1)  # [B*T*H]
-#         attn_energies = self.score(h, encoder_outputs)
-#         return F.softmax(attn_energies, dim=1).unsqueeze(1)
+    def forward(self, hidden, encoder_outputs):
+        timestep = encoder_outputs.size(0)
+        h = hidden.repeat(timestep, 1, 1).transpose(0, 1)
+        encoder_outputs = encoder_outputs.transpose(0, 1)  # [B*T*H]
+        attn_energies = self.score(h, encoder_outputs)
+        return F.softmax(attn_energies, dim=1).unsqueeze(1)
 
-#     def score(self, hidden, encoder_outputs):
-#         # [B*T*2H]->[B*T*H]
-#         energy = F.relu(self.attn(torch.cat([hidden, encoder_outputs], 2)))
-#         energy = energy.transpose(1, 2)  # [B*H*T]
-#         v = self.v.repeat(encoder_outputs.size(0), 1).unsqueeze(1)  # [B*1*H]
-#         energy = torch.bmm(v, energy)  # [B*1*T]
-#         return energy.squeeze(1) 
+    def score(self, hidden, encoder_outputs):
+        # [B*T*2H]->[B*T*H]
+        energy = F.relu(self.attn(torch.cat([hidden, encoder_outputs], 2)))
+        energy = energy.transpose(1, 2)  # [B*H*T]
+        v = self.v.repeat(encoder_outputs.size(0), 1).unsqueeze(1)  # [B*1*H]
+        energy = torch.bmm(v, energy)  # [B*1*T]
+        return energy.squeeze(1) 
 
 
 class Decoder(nn.Module):
@@ -154,7 +154,7 @@ class Decoder(nn.Module):
         
         self.embed = nn.Embedding(output_size, embed_size)
         self.dropout = nn.Dropout(dropout, inplace=True)
-        # self.attention = Attention(hidden_size)
+        self.attention = Attention(hidden_size)
         self.gru = nn.GRU(hidden_size+embed_size, 
                           hidden_size,
                           n_layers,
@@ -167,20 +167,22 @@ class Decoder(nn.Module):
         # Get the embedding of the current input word (last output word)
         batch_size = input_seq.size(1)
         embedded = self.embed(input_seq)#(1,B,N)
+        # print('decoder input{} embed{}'.format(input_seq.size(), embedded.size()), end='\r')
+        # print(embedded.size())
         embedded = self.dropout(embedded)
-        # attn_weights = self.attention(last_hidden[-1], encoder_outputs) 
-        # context = attn_weights.bmm(encoder_outputs.transpose(0,1))#(B,1,N)
-        # context = context.transpose(0,1)#(1,b,N)
-        context = encoder_outputs.transpose(0,1) #[L x B x N] -> [B x L x N]
-        context = context.mean(dim = 1).unsqueeze(1) #[B x L x N] -> [B x 1 x N]
-        context = context.transpose(0, 1)#[B x 1 x N] -> [1 x B x N]
+        # print(embedded.size())
+        # Calculate attention weights and apply to encoder outputs
+        attn_weights = self.attention(last_hidden[-1], encoder_outputs) 
+        context = attn_weights.bmm(encoder_outputs.transpose(0,1))#(B,1,N)
+        # print(embedded.size())
+        context = context.transpose(0,1)#(1,b,N)
         # Combine embedded input word and attended context, run through RNN
         rnn_input = torch.cat([embedded, context], 2)
         output, hidden= self.gru(rnn_input, last_hidden)
         output = output.squeeze(0) #(1,B,N) -> (B.N)
         context = context.squeeze(0)
         output = self.out(torch.cat([output, context], 1) )# B x E
-        return output.unsqueeze(0), hidden
+        return output.unsqueeze(0), hidden, attn_weights
 
 
 class Seq2seq_new(nn.Module):
@@ -216,7 +218,7 @@ class Seq2seq_new(nn.Module):
 
         for i in range(max_target_length):
             # print(decoder_input.size())
-            output, hidden = self.decoder(decoder_input, hidden, encoder_output)
+            output, hidden, attn_weight = self.decoder(decoder_input, hidden, encoder_output)
             all_decoder_outputs[i] = output
             is_teacher = random.random() < teacher_forcing_ratio
             if is_teacher :
@@ -312,7 +314,7 @@ def train(args, train, valid):
             #save model
             if not best_val_loss or avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                torch.save(model, './model/seq2seq.pt')
+                torch.save(model, './model/seq2seq_attention.pt')
         print('-----------------------------------------------')
         model.train() #new epoch start
 
@@ -372,7 +374,7 @@ if __name__ == '__main__':
     # train(args)
     
     
-    train_flag = True
+    train_flag = False
     if train_flag:
         print('loading training data...')
         with open(args.output_dir+'/train.pkl', 'rb') as f:
@@ -407,7 +409,7 @@ if __name__ == '__main__':
                                             collate_fn = test_dataset.collate_fn
                                             )
         print('load model...')
-        model = torch.load('./model/seq2seq.pt').to(device)
+        model = torch.load('./model/seq2seq_attention.pt').to(device)
 
         outputs = predict(args, test_loader, model)
 
